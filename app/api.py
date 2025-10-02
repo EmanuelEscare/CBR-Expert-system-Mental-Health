@@ -5,7 +5,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from .db import SessionLocal
 from . import models, cbr
-from .schemas import DiagnoseRequest, DiagnoseResponse
+from .schemas import DiagnoseRequest, DiagnoseResponse, RetainRequest
 
 router = APIRouter()
 
