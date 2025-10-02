@@ -28,8 +28,8 @@ async def list_symptoms(q: str | None = None, db: Session = Depends(get_db)):
     if q:
         like = f"%{q}%"
         stmt = stmt.where(models.Symptom.name.like(like))
-        rows = db.execute(stmt.order_by(models.Symptom.code)).scalars().all()
-        return [{"code": r.code, "name": r.name, "category_code": r.category_code} for r in rows]
+    rows = db.execute(stmt.order_by(models.Symptom.code)).scalars().all()
+    return [{"code": r.code, "name": r.name, "category_code": r.category_code} for r in rows]
 
 
 @router.get("/v1/diseases")

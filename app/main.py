@@ -3,6 +3,7 @@ import os
 from fastapi import FastAPI
 from .seed import bootstrap_if_empty
 from .db import Base, engine
+from .api import router as api_router
 
 API_PREFIX = os.getenv("API_PREFIX", "").rstrip("/")
 
@@ -16,6 +17,12 @@ app = FastAPI(
     redoc_url=pref("/redoc"),
     openapi_url=pref("/openapi.json"),
 )
+
+app.include_router(api_router, prefix=pref(""))
+
+@app.get(pref("/health"))
+def health():
+    return {"status": "ok"}
 
 @app.on_event("startup")
 def on_startup():
