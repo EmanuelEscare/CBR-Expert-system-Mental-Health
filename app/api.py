@@ -94,41 +94,93 @@ async def retain_case(payload: RetainRequest, db: Session = Depends(get_db)):
 
 @router.post("/v1/diagnose", response_model=DiagnoseResponse)
 async def diagnose(req: DiagnoseRequest, request: Request, db: Session = Depends(get_db)):
+    # 1) Normaliza entrada: usa O weights O symptoms
     if not req.symptoms and not req.weights:
         raise HTTPException(422, detail="Provide symptoms[] or weights{}")
-    weights = req.weights or {s: 1.0 for s in (req.symptoms or [])}
 
+    # Códigos válidos en BD
+    sym_rows = db.execute(select(models.Symptom.code)).all()
+    valid_sym = {row[0] for row in sym_rows}
 
-    cases = db.execute(select(models.Case).where(models.Case.is_active == True)).scalars().all()
+    # Si mandan weights, los limpiamos y priorizamos
+    weights: dict[str, float] = {}
+    if req.weights:
+        bad = [k for k in req.weights.keys() if k not in valid_sym]
+        if bad:
+            raise HTTPException(422, detail=f"Unknown symptom_code(s) in weights: {', '.join(bad)}")
+        # filtra ceros / None y castea a float
+        weights = {k: float(v) for k, v in req.weights.items() if v and float(v) != 0.0}
+    else:
+        # construye pesos uniformes desde la lista de síntomas
+        bad = [s for s in (req.symptoms or []) if s not in valid_sym]
+        if bad:
+            raise HTTPException(422, detail=f"Unknown symptom_code(s): {', '.join(bad)}")
+        weights = {s: 1.0 for s in (req.symptoms or [])}
+
+    if not weights:
+        raise HTTPException(422, detail="Empty weights after validation")
+
+    # 2) Recupera casos activos
+    cases = db.execute(
+        select(models.Case).where(models.Case.is_active.is_(True))
+    ).scalars().all()
+
+    if not cases:
+        # registra la consulta sin resultados y devuelve vacío
+        consult = models.Consult(
+            top_k=req.top_k or 3,
+            query_weights=weights,
+            client_ip=request.client.host if request.client else None,
+            user_agent=request.headers.get("User-Agent"),
+        )
+        db.add(consult); db.commit()
+        return {"consult_id": consult.id, "proposals": []}
+
+    # 3) Ejecuta CBR
     retr = cbr.retrieve(cases, weights)
-    props = cbr.reuse(retr, top_k=req.top_k)
+    props = cbr.reuse(retr, top_k=req.top_k or 3)
 
-
+    # 4) Persiste consulta
     consult = models.Consult(
-    top_k=req.top_k,
-    query_weights=weights,
-    client_ip=request.client.host if request.client else None,
-    user_agent=request.headers.get("User-Agent"),
+        top_k=req.top_k or 3,
+        query_weights=weights,
+        client_ip=request.client.host if request.client else None,
+        user_agent=request.headers.get("User-Agent"),
     )
     db.add(consult); db.flush()
 
-
     response_payload = []
     for i, p in enumerate(props, start=1):
-        sol_names = db.execute(
-    select(models.Solution.name).where(models.Solution.code.in_(p["solutions"]))
-    ).scalars().all()
-    db.add(models.ConsultResult(
-    consult_id=consult.id,
-    rank_pos=i,
-    disease_code=p["disease_code"],
-    similarity=p["similarity"],
-    matched={"codes": p["matched_symptoms"]},
-    missing={"codes": p["missing_from_query"]},
-    solutions={"codes": p["solutions"], "names": sol_names},
-    ))
-    response_payload.append({**p, "solutions": sol_names})
+        # asegúrate de que estos sean listas serializables
+        matched = list(p.get("matched_symptoms", []))
+        missing = list(p.get("missing_from_query", []))
+        sol_codes = list(p.get("solutions", []))
 
+        # nombres de soluciones
+        sol_names = db.execute(
+            select(models.Solution.name).where(models.Solution.code.in_(sol_codes)) if sol_codes
+            else select(models.Solution.name).where(False)  # no-op si vacío
+        ).scalars().all()
+
+        # Guarda resultado detallado (JSON serializable)
+        db.add(models.ConsultResult(
+            consult_id=consult.id,
+            rank_pos=i,
+            disease_code=p["disease_code"],
+            similarity=float(p.get("similarity", 0)),
+            matched={"codes": matched},
+            missing={"codes": missing},
+            solutions={"codes": sol_codes, "names": sol_names},
+        ))
+
+        # Respuesta pública
+        response_payload.append({
+            "disease_code": p["disease_code"],
+            "similarity": float(p.get("similarity", 0)),
+            "matched_symptoms": matched,
+            "missing_from_query": missing,
+            "solutions": sol_names,  # si tu esquema espera CÓDIGOS, cambia a sol_codes
+        })
 
     db.commit()
     return {"consult_id": consult.id, "proposals": response_payload}
