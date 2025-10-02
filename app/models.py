@@ -1,7 +1,11 @@
+from datetime import datetime
+
 from sqlalchemy import (
-    Column, Integer, String, Float, DateTime, Boolean, ForeignKey, JSON, String, Text, TIMESTAMP, DECIMAL, func
+    Integer, String, Float, DateTime, Boolean, ForeignKey, JSON, Text, DECIMAL,
+    func, text
 )
 from sqlalchemy.orm import relationship, Mapped, mapped_column
+
 from .db import Base
 
 
@@ -59,14 +63,18 @@ class CaseSolution(Base):
 
 class Consult(Base):
     __tablename__ = "consults"
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    created_at = Column(DateTime, server_default=func.now(), nullable=False)
-    top_k = Column(Integer, nullable=False)
-    query_weights = Column(JSON, nullable=False)  # JSON con los pesos de la consulta
-    client_ip = Column(String(64))
-    user_agent = Column(String(255))
-    # Si tu tabla ya tiene columna `solutions` con constraint, déjala modelada para que SQLAlchemy la conozca:
-    # solutions = Column(JSON, nullable=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), nullable=False
+    )
+    top_k: Mapped[int] = mapped_column(Integer, nullable=False)
+    query_weights: Mapped[dict] = mapped_column(JSON, nullable=False)
+    client_ip: Mapped[str | None] = mapped_column(String(64))
+    user_agent: Mapped[str | None] = mapped_column(String(255))
+    # ⚠️ Si tu DB tiene un CHECK sobre `solutions`, mantén esta columna:
+    solutions: Mapped[dict | list | None] = mapped_column(
+        JSON, nullable=True, server_default=text("'[]'")
+    )
 
     results = relationship(
         "ConsultResult",
@@ -75,15 +83,20 @@ class Consult(Base):
         passive_deletes=True,
     )
 
+
 class ConsultResult(Base):
     __tablename__ = "consult_results"
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    consult_id = Column(Integer, ForeignKey("consults.id", ondelete="CASCADE"), nullable=False, index=True)
-    rank_pos = Column(Integer, nullable=False)
-    disease_code = Column(String(10), ForeignKey("diseases.code"), nullable=False)
-    similarity = Column(Float, nullable=False)
-    matched = Column(JSON, nullable=False)   # p.ej. {"codes": [...]}
-    missing = Column(JSON, nullable=False)   # p.ej. {"codes": [...]}
-    solutions = Column(JSON, nullable=False) # p.ej. {"codes": [...], "names": [...]}
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    consult_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("consults.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    rank_pos: Mapped[int] = mapped_column(Integer, nullable=False)
+    disease_code: Mapped[str] = mapped_column(
+        String(3), ForeignKey("diseases.code"), nullable=False
+    )
+    similarity: Mapped[float] = mapped_column(Float, nullable=False)
+    matched: Mapped[dict] = mapped_column(JSON, nullable=False)   # {"codes": [...]}
+    missing: Mapped[dict] = mapped_column(JSON, nullable=False)   # {"codes": [...]}
+    solutions: Mapped[dict] = mapped_column(JSON, nullable=False) # {"codes": [...], "names": [...]}
 
     consult = relationship("Consult", back_populates="results")
