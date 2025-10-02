@@ -5,7 +5,6 @@ from sqlalchemy import (
     func, text
 )
 from sqlalchemy.orm import relationship, Mapped, mapped_column
-
 from .db import Base
 
 
@@ -37,11 +36,15 @@ class Solution(Base):
 class Case(Base):
     __tablename__ = "cases"
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    disease_code: Mapped[str] = mapped_column(String(3), ForeignKey("diseases.code"), nullable=False)
+    disease_code: Mapped[str] = mapped_column(
+        String(3), ForeignKey("diseases.code"), nullable=False
+    )
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    created_at: Mapped[str] = mapped_column(TIMESTAMP, server_default=Text("CURRENT_TIMESTAMP"))
-
+    # ✅ usa DateTime + func.now() (o text("CURRENT_TIMESTAMP"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(), server_default=func.now(), nullable=False
+    )
 
     disease = relationship("Disease")
     symptom_weights = relationship("CaseSymptomWeight", cascade="all, delete-orphan")
