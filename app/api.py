@@ -1,10 +1,11 @@
 from fastapi import APIRouter, Depends, Request, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
+
 from .db import SessionLocal
-from . import models
-from . import cbr
-from .schemas import DiagnoseRequest, DiagnoseResponse, RetainRequest
+from . import models, cbr
+from .schemas import DiagnoseRequest, DiagnoseResponse
 
 router = APIRouter()
 
@@ -94,96 +95,91 @@ async def retain_case(payload: RetainRequest, db: Session = Depends(get_db)):
 
 @router.post("/v1/diagnose", response_model=DiagnoseResponse)
 async def diagnose(req: DiagnoseRequest, request: Request, db: Session = Depends(get_db)):
-    # 1) Validación y normalización de entrada
+    # 1) Validación mínima
     if not req.symptoms and not req.weights:
         raise HTTPException(422, detail="Provide symptoms[] or weights{}")
 
-    # Códigos de síntomas válidos
-    sym_codes_db = set(db.execute(select(models.Symptom.code)).scalars().all())
-
-    # Construir 'weights' finales (prioriza req.weights si viene)
-    weights: dict[str, float] = {}
-    if req.weights:
-        unknown = [k for k in req.weights.keys() if k not in sym_codes_db]
-        if unknown:
-            raise HTTPException(422, detail=f"Unknown symptom_code(s) in weights: {', '.join(unknown)}")
-        # filtra 0/None y castea a float
-        weights = {k: float(v) for k, v in req.weights.items() if v is not None and float(v) != 0.0}
-    else:
-        unknown = [s for s in (req.symptoms or []) if s not in sym_codes_db]
-        if unknown:
-            raise HTTPException(422, detail=f"Unknown symptom_code(s): {', '.join(unknown)}")
-        weights = {s: 1.0 for s in (req.symptoms or [])}
-
-    if not weights:
-        raise HTTPException(422, detail="Empty weights after validation")
-
-    # 2) Recupera casos activos
-    cases = db.execute(
-        select(models.Case).where(models.Case.is_active.is_(True))
-    ).scalars().all()
-
-    top_k = req.top_k or 3
-
-    # 3) Ejecuta CBR (si no hay casos, retorna vacío)
-    retr = cbr.retrieve(cases, weights) if cases else []
-    props = cbr.reuse(retr, top_k=top_k) if retr else []
-
-    # 4) Persistencia y respuesta (con manejo de transacción)
     try:
-        # IMPORTANTE: solutions=[] para cumplir el CHECK(JSON_VALID(solutions))
-        consult = models.Consult(
-            top_k=top_k,
-            query_weights=weights,
-            client_ip=(request.client.host if request.client else None),
-            user_agent=request.headers.get("User-Agent"),
-            solutions=[],  # no dejes NULL
-        )
-        db.add(consult)
-        db.flush()  # para tener consult.id
+        # --- Construir pesos válidos (filtrando códigos inexistentes) ---
+        sym_codes = set(db.execute(select(models.Symptom.code)).scalars().all())
 
+        weights: dict[str, float] = {}
+        if req.weights:
+            # tomar solo los códigos válidos y normalizar a float
+            for k, v in req.weights.items():
+                if k in sym_codes:
+                    try:
+                        w = float(v)
+                    except Exception:
+                        continue
+                    # clamp por seguridad
+                    if w < 0:
+                        w = 0.0
+                    if w > 1:
+                        w = 1.0
+                    weights[k] = w
+
+        # añadir síntomas marcados sin peso (peso 1.0 por defecto)
+        for code in (req.symptoms or []):
+            if code in sym_codes and code not in weights:
+                weights[code] = 1.0
+
+        if not weights:
+            raise HTTPException(422, detail="No valid symptom codes in request.")
+
+        # 2) Recuperar casos activos y ejecutar CBR
+        cases = db.execute(
+            select(models.Case).where(models.Case.is_active == True)
+        ).scalars().all()
+
+        retrieved = cbr.retrieve(cases, weights)
+        proposals = cbr.reuse(retrieved, top_k=req.top_k)
+
+        # 3) Resolver nombres de soluciones por propuesta
         response_payload = []
-        agg_sol_codes: set[str] = set()
+        all_solution_codes: set[str] = set()
 
-        for i, p in enumerate(props, start=1):
-            matched = list(p.get("matched_symptoms", []))          # evita sets
-            missing = list(p.get("missing_from_query", []))
-            sol_codes = list(p.get("solutions", []))
-            agg_sol_codes.update(sol_codes)
-
-            # Nombres de soluciones (opcional; devuelves nombres en la API pública)
-            sol_names: list[str] = []
+        for p in proposals:
+            sol_codes = p.get("solutions", [])
             if sol_codes:
+                all_solution_codes.update(sol_codes)
                 sol_names = db.execute(
                     select(models.Solution.name).where(models.Solution.code.in_(sol_codes))
                 ).scalars().all()
+            else:
+                sol_names = []
 
-            # Guarda resultado detallado
-            db.add(models.ConsultResult(
-                consult_id=consult.id,
-                rank_pos=i,
-                disease_code=p["disease_code"],
-                similarity=float(p.get("similarity", 0)),
-                matched={"codes": matched},
-                missing={"codes": missing},
-                solutions={"codes": sol_codes, "names": sol_names},
-            ))
-
-            # Respuesta pública (si prefieres códigos, cambia 'solutions': sol_names -> sol_codes)
             response_payload.append({
                 "disease_code": p["disease_code"],
-                "similarity": float(p.get("similarity", 0)),
-                "matched_symptoms": matched,
-                "missing_from_query": missing,
+                "similarity": p["similarity"],
+                "matched_symptoms": p.get("matched_symptoms", []),
+                "missing_from_query": p.get("missing_from_query", []),
+                # devolvemos nombres para el cliente
                 "solutions": sol_names,
             })
 
-        # Guarda un agregado de soluciones (códigos) en la propia consulta
-        consult.solutions = sorted(agg_sol_codes)
-
+        # 4) Registrar la consulta en 'consults'
+        #    IMPORTANTE: tu tabla 'consults' exige 'solutions' (constraint NOT NULL),
+        #    así que guardamos al menos una lista JSON (por ejemplo, los códigos únicos).
+        consult = models.Consult(
+            top_k=req.top_k,
+            query_weights=weights,  # JSON
+            client_ip=(request.client.host if request.client else None),
+            user_agent=request.headers.get("User-Agent"),
+            solutions=list(sorted(all_solution_codes))  # JSON, NO vacío
+        )
+        db.add(consult)
         db.commit()
+
         return {"consult_id": consult.id, "proposals": response_payload}
 
-    except Exception:
-        db.rollback()
+    except HTTPException:
+        # re-lanzar validaciones
         raise
+    except SQLAlchemyError as e:
+        db.rollback()
+        # expone mensaje resumido; ver detalles en logs
+        raise HTTPException(500, detail="Database error while storing consult.") from e
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(500, detail="Unexpected error.") from e
