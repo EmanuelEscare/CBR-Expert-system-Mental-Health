@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from .db import engine, Base
 from .api import router
-from .seed import bootstrap_if_empty
+# from .seed import bootstrap_if_empty
 
 
 load_dotenv()
