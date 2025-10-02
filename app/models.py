@@ -36,7 +36,7 @@ class Case(Base):
     disease_code: Mapped[str] = mapped_column(String(3), ForeignKey("diseases.code"), nullable=False)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    created_at: Mapped[str] = mapped_column(TIMESTAMP, server_default=text("CURRENT_TIMESTAMP"))
+    created_at: Mapped[str] = mapped_column(TIMESTAMP, server_default=Text("CURRENT_TIMESTAMP"))
 
 
     disease = relationship("Disease")
