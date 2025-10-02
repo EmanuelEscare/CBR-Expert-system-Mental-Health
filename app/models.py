@@ -1,5 +1,5 @@
 from sqlalchemy import (
-CHAR, VARCHAR, TEXT, INT, DECIMAL, JSON, TIMESTAMP, ForeignKey, Boolean, text
+    Column, Integer, String, Float, DateTime, Boolean, ForeignKey, JSON, func
 )
 from sqlalchemy.orm import relationship, Mapped, mapped_column
 from .db import Base
@@ -59,10 +59,31 @@ class CaseSolution(Base):
 
 class Consult(Base):
     __tablename__ = "consults"
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    top_k: Mapped[int] = mapped_column(INT, default=3, nullable=False)
-    query_weights: Mapped[dict] = mapped_column(JSON, nullable=False)
-    client_ip: Mapped[str | None] = mapped_column(VARCHAR(45))
-    user_agent: Mapped[str | None] = mapped_column(VARCHAR(255))
-    created_at: Mapped[str] = mapped_column(TIMESTAMP, server_default=text("CURRENT_TIMESTAMP"))
-    solutions: Mapped[dict] = mapped_column(JSON, nullable=False)
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    top_k = Column(Integer, nullable=False)
+    query_weights = Column(JSON, nullable=False)  # JSON con los pesos de la consulta
+    client_ip = Column(String(64))
+    user_agent = Column(String(255))
+    # Si tu tabla ya tiene columna `solutions` con constraint, déjala modelada para que SQLAlchemy la conozca:
+    # solutions = Column(JSON, nullable=True)
+
+    results = relationship(
+        "ConsultResult",
+        back_populates="consult",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+class ConsultResult(Base):
+    __tablename__ = "consult_results"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    consult_id = Column(Integer, ForeignKey("consults.id", ondelete="CASCADE"), nullable=False, index=True)
+    rank_pos = Column(Integer, nullable=False)
+    disease_code = Column(String(10), ForeignKey("diseases.code"), nullable=False)
+    similarity = Column(Float, nullable=False)
+    matched = Column(JSON, nullable=False)   # p.ej. {"codes": [...]}
+    missing = Column(JSON, nullable=False)   # p.ej. {"codes": [...]}
+    solutions = Column(JSON, nullable=False) # p.ej. {"codes": [...], "names": [...]}
+
+    consult = relationship("Consult", back_populates="results")
